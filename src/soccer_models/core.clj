@@ -2,7 +2,8 @@
   (:gen-class)
   (:require 
    [clojure.data.csv :as csv]
-   [clojure.java.io :as io]))
+   [clojure.java.io :as io]
+   [incanter.optimize :as op]))
 
 (defn log [x]
   (do (println x))
@@ -59,17 +60,20 @@
        (#(repeat % 0))
        (zipmap keys)))
 
-(defn init-params [games]
+(defn init-x [games]
   (let [teams (unique-teams games)]
-    (hash-map :off (map-zeroes teams),
-              :def (map-zeroes teams)
-              :hfa 0.0)))
+    (-> teams
+        count  ; n-teams
+        (* 2)  ; account for off and def
+        (+ 1)  ; add room for hfa parameter
+        (repeat 0))))
 
-(defn update-params [params new-vals]
-  (let [n-teams (count (:off params))]
-    (hash-map :off (take n-teams new-vals),
-              :def (->> new-vals (drop n-teams) (take n-teams))
-              :hfa (take-last 1 new-vals))))
+; Need to make :off and :def *maps*
+(defn array->params [teams x]
+  (let [n-teams (count teams)]
+    (hash-map :off (->> x (take n-teams) (zipmap teams)),
+              :def (->> x (drop n-teams) (take n-teams) (zipmap teams))
+              :hfa (->> x (take-last 1) first))))
 
 (defn exp [x]
   (Math/pow Math/E x))
@@ -81,12 +85,12 @@
   (->> (Math/pow lambda k)
        (* (exp (* lambda -1)))
        (#(/ % (factorial k)))
-       (Math/log)))
+       Math/log))
 
-(defn calculate-rate [params o-team d-team hfa-op]
+(defn calculate-rate [params o-team d-team hfa-fun]
   (let [o-param (o-team (:off params))
         d-param (d-team (:def params))]
-    (-> (hfa-op (+ o-param d-param) (:hfa params))
+    (-> (hfa-fun (+ o-param d-param) (:hfa params))
         exp)))
 
 (defn calculate-rates [params game]
@@ -103,14 +107,14 @@
     (poisson-lpmf hr hg)))
 
 (defn away-log-like [rates]
-  (let [hg (:away-goals rates)
-        hr (:away-rate rates)]
-    (poisson-lpmf hr hg)))
+  (let [ag (:away-goals rates)
+        ar (:away-rate rates)]
+    (poisson-lpmf ar ag)))
 
 (defn log-like-game [params game]
   (->> game
        (calculate-rates params)
-       (#(* (home-log-like %1) (away-log-like %1)))))
+       (#(+ (home-log-like %1) (away-log-like %1)))))
 
 (defn neg-log-like [params games]
   (->> games
@@ -118,11 +122,21 @@
        (map #(* -1 %))
        (reduce +)))
 
-(defn fit [games]
-  (-> games
-      (init-params)
-      (...)))
+(defn objective-function [x games]
+  (let [teams (unique-teams games)]
+    (->> x
+        (log)
+        (array->params teams)
+        (#(neg-log-like % games)))))
 
-(def games (load-games "resources/data.csv"))
-(def params (init-params games))
+(defn fit [games]
+  (let [teams (unique-teams games)
+        f (fn [x] (objective-function x games))]
+    (->> games
+         init-x
+         (op/minimize f))))
+
+(def games (load-games "data/2016.csv"))
+(def teams (unique-teams games))
+(def params (->> games init-x (array->params teams)))
 (neg-log-like params games)
